@@ -870,6 +870,7 @@ func TestCapabilitiesUnix(t *testing.T) {
 	conf := &config.Config{
 		PrivilegedDisabled:       config.BooleanDefaultFalse{Value: config.ExplicitlyEnabled},
 		VolumePluginCapabilities: []string{capabilityEFSAuth},
+		EBSTASupportEnabled:      true,
 	}
 
 	mockPauseLoader.EXPECT().IsLoaded(gomock.Any()).Return(true, nil)
@@ -914,6 +915,7 @@ func TestCapabilitiesUnix(t *testing.T) {
 		attributePrefix + capabilityEnvFilesS3,
 		attributePrefix + capabilityContainerPortRange,
 		attributePrefix + capabilityContainerRestartPolicy,
+		attributePrefix + capabilityEBSTANonRootUser,
 	}
 
 	var expectedCapabilities []types.Attribute
@@ -1153,4 +1155,19 @@ func convertToInterfaceList(strings []string) []interface{} {
 		interfaces[i] = s
 	}
 	return interfaces
+}
+
+func TestAppendIPv6OnlyCapability(t *testing.T) {
+	capabilities := []types.Attribute{
+		types.Attribute{Name: aws.String("cap1")},
+		types.Attribute{Name: aws.String("cap2")},
+	}
+	capabilities = appendIPv6OnlyCapability(capabilities)
+	assert.Equal(t,
+		[]types.Attribute{
+			types.Attribute{Name: aws.String("cap1")},
+			types.Attribute{Name: aws.String("cap2")},
+			types.Attribute{Name: aws.String("ecs.capability.ipv6-only")},
+		},
+		capabilities)
 }

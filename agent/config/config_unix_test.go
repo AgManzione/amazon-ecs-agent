@@ -25,8 +25,9 @@ import (
 	"testing"
 	"time"
 
-	mock_netlinkwrapper "github.com/aws/amazon-ecs-agent/agent/utils/netlinkwrapper/mocks"
 	mock_ec2 "github.com/aws/amazon-ecs-agent/ecs-agent/ec2/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/netlinkwrapper"
+	mock_netlinkwrapper "github.com/aws/amazon-ecs-agent/ecs-agent/utils/netlinkwrapper/mocks"
 	cniTypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -344,7 +345,7 @@ func TestDetermineIPCompatibility(t *testing.T) {
 
 			// Run the test
 			cfg := Config{}
-			cfg.determineIPCompatibility(imdsClient)
+			cfg.determineIPCompatibility()
 			assert.Equal(t, tc.expected, cfg.InstanceIPCompatibility)
 		})
 	}
@@ -353,13 +354,16 @@ func TestDetermineIPCompatibility(t *testing.T) {
 // Tests that IPCompatibility defaults to IPv4-only when determining IP compatibility of
 // the container instance fails due to some error.
 func TestIPCompatibilityFallback(t *testing.T) {
-	// TODO feat:IPv6-only - Remove skip
-	t.Skip("Enable when launching IPv6-only support")
 	defer setTestRegion()()
-	ctrl := gomock.NewController(t)
-	mockEc2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
 
-	mockEc2Metadata.EXPECT().PrimaryENIMAC().Return("invalid", nil) // fails to parse
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockEc2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
+	mockNLWrapper := mock_netlinkwrapper.NewMockNetLink(ctrl)
+	defer setMockNLWrapper(mockNLWrapper)()
+
+	mockNLWrapper.EXPECT().RouteList(nil, netlink.FAMILY_V4).Return(nil, assert.AnError)
 	mockEc2Metadata.EXPECT().GetUserData()
 
 	config, err := NewConfig(mockEc2Metadata)
@@ -368,25 +372,135 @@ func TestIPCompatibilityFallback(t *testing.T) {
 	assert.Equal(t, config.InstanceIPCompatibility.IsIPv6Compatible(), false)
 }
 
+// setMockNLWrapper is a helper function to set nlWrapper to a mock value.
+// Returns a function that resets nlWrapper to its original value.
+//
+// Usage: defer setMockNLWrapper(mock)()
+func setMockNLWrapper(mock netlinkwrapper.NetLink) func() {
+	original := nlWrapper
+	nlWrapper = mock
+	return func() { nlWrapper = original }
+}
+
 func TestShouldExcludeIPv6PortBindingDefault(t *testing.T) {
-	t.Run("ipv6-only instance", func(t *testing.T) {
-		assert.False(t,
-			DefaultConfig(ipcompatibility.NewIPv6OnlyCompatibility()).
-				ShouldExcludeIPv6PortBinding.Enabled())
-	})
-	t.Run("dual-stack instance", func(t *testing.T) {
-		assert.True(t,
-			DefaultConfig(ipcompatibility.NewDualStackCompatibility()).
-				ShouldExcludeIPv6PortBinding.Enabled())
-	})
-	t.Run("ipv4-only instance", func(t *testing.T) {
-		assert.True(t,
-			DefaultConfig(ipcompatibility.NewIPv4OnlyCompatibility()).
-				ShouldExcludeIPv6PortBinding.Enabled())
-	})
-	t.Run("no ip compatibility", func(t *testing.T) {
-		assert.True(t,
-			DefaultConfig(ipcompatibility.NewIPCompatibility(false, false)).
-				ShouldExcludeIPv6PortBinding.Enabled())
-	})
+	testCases := []struct {
+		name                    string
+		instanceIPCompatibility ipcompatibility.IPCompatibility
+		expectedExcludeIPv6     BooleanDefaultTrue
+	}{
+		{
+			name:                    "ipv6-only instance",
+			instanceIPCompatibility: ipcompatibility.NewIPv6OnlyCompatibility(),
+			expectedExcludeIPv6:     BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		},
+		{
+			name:                    "dual-stack instance",
+			instanceIPCompatibility: ipcompatibility.NewDualStackCompatibility(),
+			expectedExcludeIPv6:     BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+		{
+			name:                    "ipv4-only instance",
+			instanceIPCompatibility: ipcompatibility.NewIPv4OnlyCompatibility(),
+			expectedExcludeIPv6:     BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+		{
+			name:                    "no ip compatibility",
+			instanceIPCompatibility: ipcompatibility.NewIPCompatibility(false, false),
+			expectedExcludeIPv6:     BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.setIPv6PortBindingDefault(tc.instanceIPCompatibility)
+			assert.Equal(t, tc.expectedExcludeIPv6, cfg.ShouldExcludeIPv6PortBinding)
+		})
+	}
+}
+
+func TestDefaultConfigIPCompatibilityAndExcludeIPv6PortBinding(t *testing.T) {
+	ipv4Gw := net.ParseIP("10.0.0.1")
+	ipv6Gw := net.ParseIP("1:2:3:4::")
+	require.NotNil(t, ipv4Gw)
+	require.NotNil(t, ipv6Gw)
+	ipv4Route := netlink.Route{Gw: ipv4Gw, Dst: nil}
+	ipv6Route := netlink.Route{Gw: ipv6Gw, Dst: nil}
+
+	testCases := []struct {
+		name                     string
+		ipCompatOverride         ipcompatibility.IPCompatibility
+		setNetlinkExpectations   func(*mock_netlinkwrapper.MockNetLink)
+		expectedInstanceIPCompat ipcompatibility.IPCompatibility
+		expectedExcludeIPv6      BooleanDefaultTrue
+	}{
+		{
+			name:                     "Override with IPv4-only",
+			ipCompatOverride:         ipcompatibility.NewIPv4OnlyCompatibility(),
+			expectedInstanceIPCompat: ipcompatibility.NewIPv4OnlyCompatibility(),
+			expectedExcludeIPv6:      BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+		{
+			name:                     "Override with IPv6-only",
+			ipCompatOverride:         ipcompatibility.NewIPv6OnlyCompatibility(),
+			expectedInstanceIPCompat: ipcompatibility.NewIPv6OnlyCompatibility(),
+			expectedExcludeIPv6:      BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		},
+		{
+			name:                     "Override with dual-stack",
+			ipCompatOverride:         ipcompatibility.NewDualStackCompatibility(),
+			expectedInstanceIPCompat: ipcompatibility.NewDualStackCompatibility(),
+			expectedExcludeIPv6:      BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+
+		{
+			name:             "No override - auto-detect IPv4-only",
+			ipCompatOverride: ipcompatibility.IPCompatibility{}, // Zero value triggers auto-detection
+			setNetlinkExpectations: func(nl *mock_netlinkwrapper.MockNetLink) {
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V4).Return([]netlink.Route{ipv4Route}, nil)
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V6).Return([]netlink.Route{}, nil)
+			},
+			expectedInstanceIPCompat: ipcompatibility.NewIPv4OnlyCompatibility(),
+			expectedExcludeIPv6:      BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+		{
+			name:             "No override - auto-detect IPv6-only",
+			ipCompatOverride: ipcompatibility.IPCompatibility{}, // Zero value triggers auto-detection
+			setNetlinkExpectations: func(nl *mock_netlinkwrapper.MockNetLink) {
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V4).Return([]netlink.Route{}, nil)
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V6).Return([]netlink.Route{ipv6Route}, nil)
+			},
+			expectedInstanceIPCompat: ipcompatibility.NewIPv6OnlyCompatibility(),
+			// IPv6 port bindings included for IPv6-only
+			expectedExcludeIPv6: BooleanDefaultTrue{Value: ExplicitlyDisabled},
+		},
+		{
+			name:             "No override - auto-detect dual-stack",
+			ipCompatOverride: ipcompatibility.IPCompatibility{}, // Zero value triggers auto-detection
+			setNetlinkExpectations: func(nl *mock_netlinkwrapper.MockNetLink) {
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V4).Return([]netlink.Route{ipv4Route}, nil)
+				nl.EXPECT().RouteList(nil, netlink.FAMILY_V6).Return([]netlink.Route{ipv6Route}, nil)
+			},
+			expectedInstanceIPCompat: ipcompatibility.NewDualStackCompatibility(),
+			expectedExcludeIPv6:      BooleanDefaultTrue{Value: ExplicitlyEnabled},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockNLWrapper := mock_netlinkwrapper.NewMockNetLink(ctrl)
+			defer setMockNLWrapper(mockNLWrapper)()
+
+			if tc.setNetlinkExpectations != nil {
+				tc.setNetlinkExpectations(mockNLWrapper)
+			}
+
+			cfg := DefaultConfig(tc.ipCompatOverride)
+			assert.Equal(t, tc.expectedInstanceIPCompat, cfg.InstanceIPCompatibility)
+			assert.Equal(t, tc.expectedExcludeIPv6, cfg.ShouldExcludeIPv6PortBinding)
+		})
+	}
 }

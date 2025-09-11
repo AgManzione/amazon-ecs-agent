@@ -125,6 +125,10 @@ func (agent *ecsAgent) appendFirelensNonRootUserCapability(capabilities []types.
 	return capabilities
 }
 
+func (agent *ecsAgent) appendEBSTANonRootUserCapabilities(capabilities []types.Attribute) []types.Attribute {
+	return capabilities
+}
+
 func (agent *ecsAgent) appendGMSACapabilities(capabilities []types.Attribute) []types.Attribute {
 	return capabilities
 }
@@ -157,4 +161,9 @@ var isFaultInjectionToolingAvailable = checkFaultInjectionTooling
 // to be available on the host before ecs.capability.fault-injection can be advertised
 func checkFaultInjectionTooling(_ *config.Config) bool {
 	return false
+}
+
+// appendIPv6OnlyCapability is a no-op.
+func appendIPv6OnlyCapability(capabilities []types.Attribute) []types.Attribute {
+	return capabilities
 }

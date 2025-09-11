@@ -24,7 +24,13 @@ import (
 	"strings"
 
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/ipcompatibility"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/cihub/seelog"
+)
+
+const (
+	osFamilyEnvVar = "ECS_DETAILED_OS_FAMILY"
 )
 
 func parseGMSACapability() BooleanDefaultFalse {
@@ -112,6 +118,16 @@ func GetOSFamily() string {
 	return strings.ToUpper(OSType)
 }
 
+// GetDetailedOSFamily returns the operating system family for linux based ecs instances.
+// it first checks the ECS_DETAILED_OS_FAMILY environment variable set by ecs-init, and falls back to "LINUX" if not set
+func GetDetailedOSFamily() string {
+	detailedOSFamily, ok := os.LookupEnv(osFamilyEnvVar)
+	if !ok {
+		return strings.ToUpper(OSType)
+	}
+	return detailedOSFamily
+}
+
 func parseTaskPidsLimit() int {
 	var taskPidsLimit int
 	pidsLimitEnvVal := os.Getenv("ECS_TASK_PIDS_LIMIT")
@@ -134,4 +150,29 @@ func parseTaskPidsLimit() int {
 	}
 
 	return taskPidsLimit
+}
+
+// parseInstanceIPCompatibility parses the ECS_INSTANCE_IP_COMPATIBILITY environment variable.
+//
+// Valid values are:
+//   - "ipv4": Returns IPv4-only compatibility
+//   - "ipv6": Returns IPv6-only compatibility
+//   - empty/unset or invalid: Returns zero value
+func parseInstanceIPCompatibility() ipcompatibility.IPCompatibility {
+	val := strings.TrimSpace(os.Getenv(envInstanceIPCompatibility))
+	if val == "" {
+		return ipcompatibility.IPCompatibility{}
+	}
+
+	switch strings.ToLower(val) {
+	case "ipv4":
+		logger.Info("Using IPv4-only from " + envInstanceIPCompatibility)
+		return ipcompatibility.NewIPv4OnlyCompatibility()
+	case "ipv6":
+		logger.Info("Using IPv6-only from " + envInstanceIPCompatibility)
+		return ipcompatibility.NewIPv6OnlyCompatibility()
+	default:
+		logger.Warn("Invalid value for config parameter", logger.Fields{envInstanceIPCompatibility: val})
+		return ipcompatibility.IPCompatibility{}
+	}
 }

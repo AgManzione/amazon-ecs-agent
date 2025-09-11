@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	ecsservice "github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,6 +36,7 @@ import (
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs"
 	mock_ecs "github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/mocks"
+	mock_client "github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/mocks/client"
 	mock_credentials "github.com/aws/amazon-ecs-agent/ecs-agent/api/ecs/mocks/credentialsprovider"
 	apitaskstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/async"
@@ -41,10 +44,9 @@ import (
 	mock_config "github.com/aws/amazon-ecs-agent/ecs-agent/config/mocks"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/ec2"
 	mock_ec2 "github.com/aws/amazon-ecs-agent/ecs-agent/ec2/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/httpclient"
 	ni "github.com/aws/amazon-ecs-agent/ecs-agent/netlib/model/networkinterface"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/retry"
-	ecsservice "github.com/aws/aws-sdk-go-v2/service/ecs"
-	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 )
 
 const (
@@ -65,6 +67,7 @@ const (
 	attachmentARN        = "eniArn"
 	agentVer             = "0.0.0"
 	osType               = "linux"
+	detailedOSFamily     = "debian_11"
 )
 
 var (
@@ -148,6 +151,7 @@ func applyMockCfgAccessorDefaults(cfgAccessor *mock_config.MockAgentConfigAccess
 	cfgAccessor.EXPECT().InstanceAttributes().Return(nil).AnyTimes()
 	cfgAccessor.EXPECT().NoInstanceIdentityDocument().Return(false).AnyTimes()
 	cfgAccessor.EXPECT().OSFamily().Return("LINUX").AnyTimes()
+	cfgAccessor.EXPECT().OSFamilyDetailed().Return(detailedOSFamily).AnyTimes()
 	cfgAccessor.EXPECT().OSType().Return(osType).AnyTimes()
 	cfgAccessor.EXPECT().ReservedMemory().Return(uint16(20)).AnyTimes()
 	cfgAccessor.EXPECT().ReservedPorts().Return([]uint16{22, 2375, 2376, 51678}).AnyTimes()
@@ -417,7 +421,10 @@ func TestSetInstanceIdentity(t *testing.T) {
 			mockConfigAccessor := mock_config.NewMockAgentConfigAccessor(ctrl)
 			mockEC2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
 			mockCredentialsProvider := mock_credentials.NewMockCredentialsProvider(ctrl)
-
+			mockConfigAccessor.EXPECT().AcceptInsecureCert().Return(false).AnyTimes()
+			mockConfigAccessor.EXPECT().OSType().Return(osType).AnyTimes()
+			mockConfigAccessor.EXPECT().OSFamilyDetailed().Return(detailedOSFamily).AnyTimes()
+			mockConfigAccessor.EXPECT().AWSRegion().Return(region).AnyTimes()
 			mockConfigAccessor.EXPECT().NoInstanceIdentityDocument().Return(tc.noInstanceIdentity).AnyTimes()
 			tc.mockEC2MetadataSetup(mockEC2Metadata)
 			tc.mockCredentialsSetup(mockCredentialsProvider)
@@ -474,6 +481,12 @@ func TestRegisterContainerInstance(t *testing.T) {
 				cfgAccessor.EXPECT().External().Return(true).AnyTimes()
 			},
 		},
+		{
+			name: "empty os detailed attribute",
+			mockCfgAccessorOverride: func(cfgAccessor *mock_config.MockAgentConfigAccessor) {
+				cfgAccessor.EXPECT().OSFamilyDetailed().Return("").AnyTimes()
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -501,6 +514,10 @@ func TestRegisterContainerInstance(t *testing.T) {
 				"ecs.availability-zone":     availabilityZone,
 				"ecs.outpost-arn":           outpostARN,
 				cpuArchAttrName:             getCPUArch(),
+			}
+			// Add ecs.os-type-detailed only if OSFamilyDetailed() returns a non-empty value
+			if tester.mockCfgAccessor.OSFamilyDetailed() != "" {
+				expectedAttributes["ecs.os-type-detailed"] = tester.mockCfgAccessor.OSFamilyDetailed()
 			}
 			capabilities := buildAttributeList(fakeCapabilities, nil)
 			platformDevices := []types.PlatformDevice{
@@ -547,12 +564,18 @@ func TestRegisterContainerInstance(t *testing.T) {
 			var expectedNumOfAttributes int
 			if !tester.mockCfgAccessor.External() {
 				// 2 capability attributes: capability1, capability2
-				// and 5 other attributes:
-				// ecs.os-type, ecs.os-family, ecs.outpost-arn, my_custom_attribute, my_other_custom_attribute.
-				expectedNumOfAttributes = 7
+				// Base attributes: ecs.os-type, ecs.os-family, ecs.outpost-arn, my_custom_attribute, my_other_custom_attribute (5)
+				// Plus ecs.os-type-detailed if OSFamilyDetailed() is not empty
+				expectedNumOfAttributes = 7 // 2 capabilities + 5 base attributes
+				if tester.mockCfgAccessor.OSFamilyDetailed() != "" {
+					expectedNumOfAttributes = 8
+				}
 			} else {
 				// One more attribute for external case: ecs.cpu-architecture.
 				expectedNumOfAttributes = 8
+				if tester.mockCfgAccessor.OSFamilyDetailed() != "" {
+					expectedNumOfAttributes = 9
+				}
 			}
 
 			gomock.InOrder(
@@ -624,6 +647,7 @@ func TestRegisterContainerInstanceWithRetryNonTerminalError(t *testing.T) {
 	expectedAttributes := map[string]string{
 		"ecs.os-type":               tester.mockCfgAccessor.OSType(),
 		"ecs.os-family":             tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type-detailed":      tester.mockCfgAccessor.OSFamilyDetailed(),
 		"my_custom_attribute":       "Custom_Value1",
 		"my_other_custom_attribute": "Custom_Value2",
 		"ecs.availability-zone":     availabilityZone,
@@ -719,6 +743,7 @@ func TestReRegisterContainerInstance(t *testing.T) {
 	expectedAttributes := map[string]string{
 		"ecs.os-type":           tester.mockCfgAccessor.OSType(),
 		"ecs.os-family":         tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type-detailed":  tester.mockCfgAccessor.OSFamilyDetailed(),
 		"ecs.availability-zone": availabilityZone,
 		"ecs.outpost-arn":       outpostARN,
 	}
@@ -743,8 +768,8 @@ func TestReRegisterContainerInstance(t *testing.T) {
 				resource, ok := findResource(req.TotalResources, "PORTS_UDP")
 				assert.True(t, ok, `Could not find resource "PORTS_UDP"`)
 				assert.Equal(t, "STRINGSET", *resource.Type, `Wrong type for resource "PORTS_UDP"`)
-				// "ecs.os-type", ecs.os-family, ecs.outpost-arn and the 2 that we specified as additionalAttributes.
-				assert.Equal(t, 5, len(req.Attributes), "Wrong number of Attributes")
+				// "ecs.os-type", ecs.os-family, ecs.os-type-detailed, ecs.outpost-arn and the 2 that we specified as additionalAttributes.
+				assert.Equal(t, 6, len(req.Attributes), "Wrong number of Attributes")
 				reqAttributes := func() map[string]string {
 					rv := make(map[string]string, len(req.Attributes))
 					for i := range req.Attributes {
@@ -815,6 +840,7 @@ func TestRegisterContainerInstanceWithEmptyTags(t *testing.T) {
 	expectedAttributes := map[string]string{
 		"ecs.os-type":               tester.mockCfgAccessor.OSType(),
 		"ecs.os-family":             tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type-detailed":      tester.mockCfgAccessor.OSFamilyDetailed(),
 		"my_custom_attribute":       "Custom_Value1",
 		"my_other_custom_attribute": "Custom_Value2",
 	}
@@ -880,8 +906,9 @@ func TestRegisterBlankCluster(t *testing.T) {
 	tester := setup(t, ctrl, mockEC2Metadata, cfgAccessorOverrideFunc)
 
 	expectedAttributes := map[string]string{
-		"ecs.os-type":   tester.mockCfgAccessor.OSType(),
-		"ecs.os-family": tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type":          tester.mockCfgAccessor.OSType(),
+		"ecs.os-family":        tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type-detailed": tester.mockCfgAccessor.OSFamilyDetailed(),
 	}
 	defaultCluster := tester.mockCfgAccessor.DefaultClusterName()
 	gomock.InOrder(
@@ -929,8 +956,9 @@ func TestRegisterBlankClusterNotCreatingClusterWhenErrorNotClusterNotFound(t *te
 	tester := setup(t, ctrl, mockEC2Metadata, cfgAccessorOverrideFunc)
 
 	expectedAttributes := map[string]string{
-		"ecs.os-type":   tester.mockCfgAccessor.OSType(),
-		"ecs.os-family": tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type":          tester.mockCfgAccessor.OSType(),
+		"ecs.os-family":        tester.mockCfgAccessor.OSFamily(),
+		"ecs.os-type-detailed": tester.mockCfgAccessor.OSFamilyDetailed(),
 	}
 
 	defaultCluster := tester.mockCfgAccessor.DefaultClusterName()
@@ -1144,32 +1172,216 @@ func TestUpdateContainerInstancesStateError(t *testing.T) {
 }
 
 func TestGetResourceTags(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	testCases := []struct {
+		name           string
+		setupMocks     func(*mock_ecs.MockECSStandardSDK)
+		inputContext   context.Context
+		expectedTags   []types.Tag
+		errorSubstring string
+	}{
+		{
+			name: "success, no container name in the context",
+			setupMocks: func(mockClient *mock_ecs.MockECSStandardSDK) {
+				mockClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+					ResourceArn: aws.String(containerInstanceARN),
+				}).Return(&ecsservice.ListTagsForResourceOutput{
+					Tags: containerInstanceTags,
+				}, nil)
+			},
+			inputContext: context.Background(),
+			expectedTags: containerInstanceTags,
+		},
+		{
+			name: "success, with container name provided in the context",
+			setupMocks: func(mockClient *mock_ecs.MockECSStandardSDK) {
+				mockClient.EXPECT().ListTagsForResource(
+					gomock.Any(),
+					&ecsservice.ListTagsForResourceInput{
+						ResourceArn: aws.String(containerInstanceARN),
+					},
+				).DoAndReturn(func(ctx context.Context, input *ecsservice.ListTagsForResourceInput, opts ...func(*ecsservice.Options)) (*ecsservice.ListTagsForResourceOutput, error) {
+					// Verify context contains container name
+					containerName := ctx.Value(httpclient.ContainerNameKey)
+					assert.Equal(t, "cont", containerName, "Expected container name in context")
+					return &ecsservice.ListTagsForResourceOutput{
+						Tags: containerInstanceTags,
+					}, nil
+				})
+			},
+			inputContext: context.WithValue(context.Background(), httpclient.ContainerNameKey, containerName),
+			expectedTags: containerInstanceTags,
+		},
+		{
+			name: "error",
+			setupMocks: func(mockClient *mock_ecs.MockECSStandardSDK) {
+				mockClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+					ResourceArn: aws.String(containerInstanceARN),
+				}).Return(nil, fmt.Errorf("ERROR")).MinTimes(1)
+			},
+			inputContext:   context.Background(),
+			errorSubstring: "GetResourceTags failed for",
+		},
+	}
 
-	tester := setup(t, ctrl, ec2.NewBlackholeEC2MetadataClient(), nil)
-	tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
-		ResourceArn: aws.String(containerInstanceARN),
-	}).Return(&ecsservice.ListTagsForResourceOutput{
-		Tags: containerInstanceTags,
-	}, nil)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
-	_, err := tester.client.GetResourceTags(containerInstanceARN)
-	assert.NoError(t, err, fmt.Sprintf("Unexpected error calling GetResourceTags: %s", err))
+			tester := setup(t, ctrl, ec2.NewBlackholeEC2MetadataClient(), nil)
+			tc.setupMocks(tester.mockStandardClient)
+
+			tags, err := tester.client.GetResourceTags(tc.inputContext, containerInstanceARN)
+
+			if tc.errorSubstring != "" {
+				assert.Error(t, err)
+				assert.ErrorContains(t, err, tc.errorSubstring)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expectedTags, tags)
+			}
+		})
+	}
 }
 
-func TestGetResourceTagsError(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+// TestGetResourceTagsWithRetry tests the exponential backoff retry functionality
+// for both transient and non-transient errors.
+func TestGetResourceTagsWithRetry(t *testing.T) {
+	testCases := []struct {
+		name          string
+		errors        []error
+		finalResponse *ecsservice.ListTagsForResourceOutput
+		finalError    error
+		expectSuccess bool
+		expectedTags  []types.Tag
+		expectedCalls int
+	}{
+		{
+			name: "Success after throttling retries",
+			errors: []error{
+				mock_client.NewThrottlingException(),
+				mock_client.NewLimitExceededException(),
+			},
+			finalResponse: &ecsservice.ListTagsForResourceOutput{
+				Tags: containerInstanceTags,
+			},
+			finalError:    nil,
+			expectSuccess: true,
+			expectedTags:  containerInstanceTags,
+			expectedCalls: 3,
+		},
+		{
+			name: "Success after server exception retries",
+			errors: []error{
+				mock_client.NewServerException(),
+			},
+			finalResponse: &ecsservice.ListTagsForResourceOutput{
+				Tags: containerInstanceTags,
+			},
+			finalError:    nil,
+			expectSuccess: true,
+			expectedTags:  containerInstanceTags,
+			expectedCalls: 2,
+		},
+		{
+			name: "Success after mixed transient errors",
+			errors: []error{
+				mock_client.NewThrottlingException(),
+				mock_client.NewServerException(),
+				mock_client.NewQuotaExceededError(),
+			},
+			finalResponse: &ecsservice.ListTagsForResourceOutput{
+				Tags: containerInstanceTags,
+			},
+			finalError:    nil,
+			expectSuccess: true,
+			expectedTags:  containerInstanceTags,
+			expectedCalls: 4,
+		},
+		{
+			name: "Non-transient error - retries until timeout",
+			errors: []error{
+				mock_client.NewInvalidParameterException(),
+			},
+			finalResponse: nil,
+			finalError:    mock_client.NewInvalidParameterException(),
+			expectSuccess: false,
+			expectedCalls: 10, // Will retry until timeout
+		},
+		{
+			name: "Non-transient error - client exception retries until timeout",
+			errors: []error{
+				mock_client.NewClientException(),
+			},
+			finalResponse: nil,
+			finalError:    mock_client.NewClientException(),
+			expectSuccess: false,
+			expectedCalls: 10, // Will retry until timeout
+		},
+		{
+			name: "Success after multiple throttling retries",
+			errors: []error{
+				mock_client.NewThrottlingException(),
+				mock_client.NewThrottlingException(),
+				mock_client.NewThrottlingException(),
+				mock_client.NewThrottlingException(),
+			},
+			finalResponse: &ecsservice.ListTagsForResourceOutput{
+				Tags: containerInstanceTags,
+			},
+			finalError:    nil,
+			expectSuccess: true,
+			expectedTags:  containerInstanceTags,
+			expectedCalls: 5,
+		},
+	}
 
-	tester := setup(t, ctrl, ec2.NewBlackholeEC2MetadataClient(), nil)
-	tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
-		ResourceArn: aws.String(containerInstanceARN),
-	}).Return(nil, fmt.Errorf("ERROR"))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
-	_, err := tester.client.GetResourceTags(containerInstanceARN)
-	assert.ErrorContains(t, err, "ERROR",
-		"Expected an error calling GetResourceTags but got nil")
+			tester := setup(t, ctrl, ec2.NewBlackholeEC2MetadataClient(), nil)
+
+			if tc.expectSuccess {
+				for _, err := range tc.errors {
+					tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+						ResourceArn: aws.String(containerInstanceARN),
+					}).Return(nil, err)
+				}
+				tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+					ResourceArn: aws.String(containerInstanceARN),
+				}).Return(tc.finalResponse, tc.finalError).Times(1)
+			} else {
+				if tc.name == "Exhausted retries" {
+					tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+						ResourceArn: aws.String(containerInstanceARN),
+					}).Return(nil, tc.errors[0]).AnyTimes()
+				} else {
+					if len(tc.errors) > 0 {
+						tester.mockStandardClient.EXPECT().ListTagsForResource(gomock.Any(), &ecsservice.ListTagsForResourceInput{
+							ResourceArn: aws.String(containerInstanceARN),
+						}).Return(nil, tc.errors[0]).MinTimes(1)
+					}
+				}
+			}
+
+			ctx := context.Background()
+			tags, err := tester.client.GetResourceTags(ctx, containerInstanceARN)
+
+			if tc.expectSuccess {
+				assert.NoError(t, err, "Expected GetResourceTags to succeed")
+				assert.Equal(t, tc.expectedTags, tags, "Unexpected tags returned")
+			} else {
+				assert.Error(t, err, "Expected GetResourceTags to fail")
+				assert.Nil(t, tags, "Expected no tags on failure")
+
+				if len(tc.errors) == 1 && tc.name != "Exhausted retries" {
+					assert.ErrorContains(t, err, "GetResourceTags failed for", "Expected wrapped error message")
+				}
+			}
+		})
+	}
 }
 
 func TestDiscoverPollEndpointCacheHit(t *testing.T) {

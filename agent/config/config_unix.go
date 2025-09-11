@@ -23,11 +23,11 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
-	netutils "github.com/aws/amazon-ecs-agent/agent/utils/net"
-	"github.com/aws/amazon-ecs-agent/agent/utils/netlinkwrapper"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/ipcompatibility"
+	commonutils "github.com/aws/amazon-ecs-agent/ecs-agent/utils"
+	netutils "github.com/aws/amazon-ecs-agent/ecs-agent/utils/net"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/netlinkwrapper"
 
-	"github.com/aws/amazon-ecs-agent/ecs-agent/ec2"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/logger/field"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tmds"
@@ -79,14 +79,14 @@ var (
 	nlWrapper = netlinkwrapper.New()
 )
 
-// DefaultConfig returns the default configuration for Linux
-func DefaultConfig(instanceIPCompatibility ipcompatibility.IPCompatibility) Config {
-	shouldExcludeIPv6PortBinding := BooleanDefaultTrue{Value: ExplicitlyEnabled}
-	if instanceIPCompatibility.IsIPv6Only() {
-		// If the instance is IPv6-only then IPv6 port bindings should be included by default
-		shouldExcludeIPv6PortBinding = BooleanDefaultTrue{Value: ExplicitlyDisabled}
-	}
-	return Config{
+// DefaultConfig returns the default configuration for Linux systems.
+//
+// The ipCompatOverride parameter allows providing an explicit IP compatibility
+// value that overrides the instance's detected IP compatibility when determining the
+// ShouldExcludeIPv6PortBinding field. If ipCompatOverride is zero/nil,
+// the instance's IP compatibility is automatically detected and used instead.
+func DefaultConfig(ipCompatOverride ipcompatibility.IPCompatibility) Config {
+	cfg := Config{
 		DockerEndpoint:                      "unix:///var/run/docker.sock",
 		ReservedPorts:                       []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, tmds.Port},
 		ReservedPortsUDP:                    []uint16{},
@@ -133,11 +133,33 @@ func DefaultConfig(instanceIPCompatibility ipcompatibility.IPCompatibility) Conf
 		FSxWindowsFileServerCapable:         BooleanDefaultTrue{Value: ExplicitlyDisabled},
 		RuntimeStatsLogFile:                 defaultRuntimeStatsLogFile,
 		EnableRuntimeStats:                  BooleanDefaultFalse{Value: NotSet},
-		ShouldExcludeIPv6PortBinding:        shouldExcludeIPv6PortBinding,
 		CSIDriverSocketPath:                 defaultCSIDriverSocketPath,
 		NodeStageTimeout:                    nodeStageTimeout,
 		NodeUnstageTimeout:                  nodeUnstageTimeout,
 		FirelensAsyncEnabled:                BooleanDefaultTrue{Value: ExplicitlyEnabled},
+	}
+
+	if commonutils.ZeroOrNil(ipCompatOverride) {
+		logger.Info("No IP compatibility override provided, detecting instance IP compatibility for default config")
+		cfg.determineIPCompatibility()
+	} else {
+		cfg.InstanceIPCompatibility = ipCompatOverride
+	}
+	cfg.setIPv6PortBindingDefault(cfg.InstanceIPCompatibility)
+
+	return cfg
+}
+
+// setIPv6PortBindingDefault sets the default value for ShouldExcludeIPv6PortBinding
+// based on the provided instance IP compatibility. For IPv6-only instances, IPv6 port
+// bindings are included by default (ShouldExcludeIPv6PortBinding = false). For all other
+// instances, IPv6 port bindings are excluded by default (ShouldExcludeIPv6PortBinding = true).
+func (cfg *Config) setIPv6PortBindingDefault(instanceIPCompat ipcompatibility.IPCompatibility) {
+	if instanceIPCompat.IsIPv6Only() {
+		// If the instance is IPv6-only then IPv6 port bindings should be included by default
+		cfg.ShouldExcludeIPv6PortBinding = BooleanDefaultTrue{Value: ExplicitlyDisabled}
+	} else {
+		cfg.ShouldExcludeIPv6PortBinding = BooleanDefaultTrue{Value: ExplicitlyEnabled}
 	}
 }
 
@@ -175,11 +197,7 @@ func getConfigFileName() (string, error) {
 // determining the IP compatibility of the container instance.
 // This is a fallback to help with graceful adoption of Agent in IPv6-only environments
 // without disrupting existing environments.
-//
-// TODO feat:IPv6-only - Remove lint rule below
-//
-//lint:ignore U1000 Function will be used in the future
-func (c *Config) determineIPCompatibility(ec2client ec2.EC2MetadataClient) {
+func (c *Config) determineIPCompatibility() {
 	var err error
 	c.InstanceIPCompatibility, err = netutils.DetermineIPCompatibility(nlWrapper, "")
 	if err != nil {

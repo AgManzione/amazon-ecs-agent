@@ -45,6 +45,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/credentialspec"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/firelens"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"github.com/aws/amazon-ecs-agent/agent/utils/endpoints"
 	referenceutil "github.com/aws/amazon-ecs-agent/agent/utils/reference"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/api/appnet"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
@@ -58,8 +59,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/ttime"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
-	"github.com/aws/smithy-go/ptr"
 	"github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/registry"
@@ -133,9 +132,9 @@ const (
 var (
 	newExponentialBackoff = retry.NewExponentialBackoff
 
-	// List of isolated regions where AWS SDK Go V1 cannot resolve the endpoints for.
+	// List of regions where Docker cannot resolve the endpoints for via AWS SDK Go.
 	// This is a short term solution only for specific regions and ideally we should not be keeping a list of hardcoded regions.
-	unresolvedIsolatedRegions = map[string]bool{
+	unresolvedRegions = map[string]bool{
 		"us-isob-east-1":  true,
 		"us-iso-east-1":   true,
 		"us-iso-west-1":   true,
@@ -143,6 +142,7 @@ var (
 		"us-isof-south-1": true,
 		"us-isof-east-1":  true,
 		"us-isob-west-1":  true,
+		"eusc-de-east-1":  true,
 	}
 )
 
@@ -1954,11 +1954,8 @@ func (engine *DockerTaskEngine) createContainer(task *apitask.Task, container *a
 		} else {
 			// This is a short term solution only for specific regions
 			region := engine.cfg.AWSRegion
-			if _, ok := unresolvedIsolatedRegions[region]; ok {
-				resolvedEndpoint, err := cloudwatchlogs.NewDefaultEndpointResolverV2().ResolveEndpoint(context.TODO(),
-					cloudwatchlogs.EndpointParameters{
-						Region: ptr.String(region),
-					})
+			if _, ok := unresolvedRegions[region]; ok {
+				resolvedEndpoint, err := endpoints.ResolveCloudWatchLogsEndpoint(region, false)
 				if err != nil {
 					logger.Warn("failed to resolve CloudWatch Logs endpoint for region", logger.Fields{
 						field.TaskARN:   task.Arn,
@@ -1967,7 +1964,7 @@ func (engine *DockerTaskEngine) createContainer(task *apitask.Task, container *a
 						field.Error:     err,
 					})
 				} else {
-					hostConfig.LogConfig.Config[awsLogsEndpointKey] = resolvedEndpoint.URI.String()
+					hostConfig.LogConfig.Config[awsLogsEndpointKey] = resolvedEndpoint
 				}
 			}
 		}
@@ -2037,8 +2034,7 @@ func (engine *DockerTaskEngine) createContainer(task *apitask.Task, container *a
 	}
 
 	if execcmd.IsExecEnabledContainer(container) {
-		tID := task.GetID()
-		err := engine.execCmdMgr.InitializeContainer(tID, container, hostConfig)
+		err := engine.execCmdMgr.InitializeContainer(task, container, hostConfig)
 		if err != nil {
 			logger.Warn("Error initializing ExecCommandAgent; proceeding to start container without exec feature", logger.Fields{
 				field.TaskID:    task.GetID(),
@@ -3021,7 +3017,7 @@ func (engine *DockerTaskEngine) setAWSLogsDualStackEndpoint(
 	}
 
 	// Resolve the endpoint
-	endpoint, err := getAWSLogsDualStackEndpoint(region)
+	endpoint, err := endpoints.ResolveCloudWatchLogsEndpoint(region, true)
 	if err != nil {
 		logger.Error(
 			"Failed to get CloudWatch Logs dual stack endpoint. Skipping setting it.",
@@ -3035,17 +3031,4 @@ func (engine *DockerTaskEngine) setAWSLogsDualStackEndpoint(
 			field.Region:   region,
 		}))
 	hostConfig.LogConfig.Config[awsLogsEndpointKey] = endpoint
-}
-
-// Returns CloudWatch Logs dual stack endpoint for the given region.
-func getAWSLogsDualStackEndpoint(region string) (string, error) {
-	endpoint, err := cloudwatchlogs.NewDefaultEndpointResolverV2().ResolveEndpoint(context.TODO(),
-		cloudwatchlogs.EndpointParameters{
-			UseDualStack: ptr.Bool(true),
-			Region:       ptr.String(region),
-		})
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve dual stack CloudWatch Logs endpoint for region '%s': %w", region, err)
-	}
-	return endpoint.URI.String(), nil
 }

@@ -198,6 +198,10 @@ func (agent *ecsAgent) appendFirelensNonRootUserCapability(capabilities []types.
 	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityFirelensNonRootUser)
 }
 
+func (agent *ecsAgent) appendEBSTANonRootUserCapabilities(capabilities []types.Attribute) []types.Attribute {
+	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityEBSTANonRootUser)
+}
+
 func (agent *ecsAgent) appendFirelensLoggingDriverCapabilities(capabilities []types.Attribute) []types.Attribute {
 	return appendNameOnlyAttribute(capabilities, capabilityPrefix+capabilityFirelensLoggingDriver)
 }
@@ -310,4 +314,10 @@ func checkTCShowTooling() bool {
 		return false
 	}
 	return true
+}
+
+// appendIPv6OnlyCapability appends ecs.capability.ipv6-only to passed capabilities and returns
+// the updated capabilities slice.
+func appendIPv6OnlyCapability(capabilities []types.Attribute) []types.Attribute {
+	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityIPv6Only)
 }

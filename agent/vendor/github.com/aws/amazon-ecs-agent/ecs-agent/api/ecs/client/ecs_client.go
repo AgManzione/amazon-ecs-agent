@@ -34,6 +34,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/ecs-agent/metrics"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/utils"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/retry"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -53,6 +54,7 @@ const (
 	cpuArchAttrName             = "ecs.cpu-architecture"
 	osTypeAttrName              = "ecs.os-type"
 	osFamilyAttrName            = "ecs.os-family"
+	osTypeDetailedAttrName      = "ecs.os-type-detailed"
 	// RoundtripTimeout should only time out after dial and TLS handshake timeouts have elapsed.
 	// Add additional 2 seconds to the sum of these 2 timeouts to be extra sure of this.
 	RoundtripTimeout = httpclient.DefaultDialTimeout + httpclient.DefaultTLSHandshakeTimeout + 2*time.Second
@@ -73,6 +75,14 @@ const (
 	rciMaxBackoff          = 192 * time.Second
 	rciRetryJitter         = 0.2
 	rciRetryMultiple       = 2.0
+
+	// Below constants are used for GetResourceTags retry with exponential backoff when receiving non-terminal errors.
+	getResourceTagsTimeout    = 30 * time.Second
+	getResourceTagsBackoffMin = 500 * time.Millisecond
+	getResourceTagsBackoffMax = 10 * time.Second
+	getResourceTagsJitter     = 0.1
+	getResourceTagsMultiplier = 1.5
+	getResourceTagsCooldown   = 1 * time.Second
 )
 
 var nonRetriableErrors = []smithy.APIError{
@@ -113,7 +123,7 @@ func NewECSClient(
 		credentialsCache:  credentialsCache,
 		configAccessor:    configAccessor,
 		ec2metadata:       ec2MetadataClient,
-		httpClient:        httpclient.New(RoundtripTimeout, configAccessor.AcceptInsecureCert(), agentVer, configAccessor.OSType()),
+		httpClient:        httpclient.New(RoundtripTimeout, configAccessor.AcceptInsecureCert(), agentVer, configAccessor.OSType(), configAccessor.OSFamilyDetailed()),
 		pollEndpointCache: async.NewTTLCache(&async.TTL{Duration: defaultPollEndpointCacheTTL}),
 	}
 
@@ -556,6 +566,17 @@ func (client *ecsClient) getAdditionalAttributes() []types.Attribute {
 			Value: aws.String(client.configAccessor.OSFamily()),
 		})
 	}
+
+	// OSFamilyDetailed should be treated as an optional field as it is not applicable for all agents
+	// using ecs client shared library. Add a check to ensure only non-empty values are added
+	// to API call.
+	if client.configAccessor.OSFamilyDetailed() != "" {
+		attrs = append(attrs, types.Attribute{
+			Name:  aws.String(osTypeDetailedAttrName),
+			Value: aws.String(client.configAccessor.OSFamilyDetailed()),
+		})
+	}
+
 	// Send CPU arch attribute directly when running on external capacity. When running on EC2 or Fargate launch type,
 	// this is not needed since the CPU arch is reported via instance identity document in those cases.
 	if client.configAccessor.External() {
@@ -888,14 +909,62 @@ func (client *ecsClient) discoverPollEndpoint(containerInstanceArn string,
 	return output, nil
 }
 
-func (client *ecsClient) GetResourceTags(resourceArn string) ([]types.Tag, error) {
-	output, err := client.standardClient.ListTagsForResource(context.TODO(), &ecsservice.ListTagsForResourceInput{
-		ResourceArn: &resourceArn,
+func (client *ecsClient) GetResourceTags(ctx context.Context, resourceArn string) ([]types.Tag, error) {
+	backoff := retry.NewExponentialBackoff(
+		getResourceTagsBackoffMin,
+		getResourceTagsBackoffMax,
+		getResourceTagsJitter,
+		getResourceTagsMultiplier,
+	)
+	ctx, cancel := context.WithTimeout(ctx, getResourceTagsTimeout)
+	defer cancel()
+
+	var (
+		tags       []types.Tag
+		lastErr    error
+		retryCount int
+	)
+
+	err := retry.RetryWithBackoffCtx(ctx, backoff, func() error {
+		retryCount++
+
+		output, err := client.standardClient.ListTagsForResource(ctx, &ecsservice.ListTagsForResourceInput{
+			ResourceArn: &resourceArn,
+		})
+		if err == nil {
+			tags = output.Tags
+			return nil
+		}
+
+		lastErr = err
+
+		if isTransientError(err) {
+			logger.Warn("ListTagsForResource throttled or rate limited", logger.Fields{
+				field.Error: err,
+				"resource":  resourceArn,
+				"attempt":   retryCount,
+			})
+			return apierrors.NewRetriableError(apierrors.NewRetriable(true), err)
+		}
+
+		logger.Error("ListTagsForResource failed", logger.Fields{
+			field.Error: err,
+			"resource":  resourceArn,
+			"attempt":   retryCount,
+		})
+		return apierrors.NewRetriableError(apierrors.NewRetriable(false), err)
 	})
+
 	if err != nil {
-		return nil, err
+		logger.Error("GetResourceTags exhausted retries", logger.Fields{
+			field.Error: lastErr,
+			"resource":  resourceArn,
+			"attempts":  retryCount,
+		})
+		return nil, fmt.Errorf("GetResourceTags failed for %s after %d attempts: %v", resourceArn, retryCount, lastErr)
 	}
-	return output.Tags, nil
+
+	return tags, nil
 }
 
 func (client *ecsClient) UpdateContainerInstancesState(instanceARN string, status types.ContainerInstanceStatus) error {
@@ -995,13 +1064,21 @@ func trimString(inputString string, maxLen int) string {
 }
 
 func isTransientError(err error) bool {
-	var apiErr smithy.APIError
-	// Using errors.As to unwrap as opposed to errors.Is.
-	if errors.As(err, &apiErr) {
+	var (
+		apiErr   smithy.APIError
+		quotaErr ratelimit.QuotaExceededError
+	)
+
+	switch {
+	case errors.As(err, &apiErr):
 		switch apiErr.ErrorCode() {
-		case apierrors.ErrCodeServerException, apierrors.ErrCodeLimitExceededException:
+		case "ThrottlingException",
+			apierrors.ErrCodeServerException,
+			apierrors.ErrCodeLimitExceededException:
 			return true
 		}
+	case errors.As(err, &quotaErr):
+		return true
 	}
 	return false
 }

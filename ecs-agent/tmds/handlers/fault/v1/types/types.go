@@ -20,6 +20,7 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/ecs-agent/tmds/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -34,6 +35,7 @@ const (
 	// Request Payload Errors
 	MissingRequiredFieldError = "required parameter %s is missing"
 	MissingRequestBodyError   = "required request body is missing"
+	ZeroDelayAndJitterError   = "required either DelayMilliseconds or JitterMilliseconds to be non-zero"
 	InvalidValueError         = "invalid value %s for parameter %s"
 )
 
@@ -119,6 +121,7 @@ type NetworkLatencyRequest struct {
 	// SourcesToFilter is a list including IPv4 addresses or IPv4 CIDR blocks that will be excluded from the
 	// network latency fault.
 	SourcesToFilter []*string `json:"SourcesToFilter,omitempty"`
+	FlowsPercent    *int      `json:"FlowsPercent"`
 }
 
 // ValidateRequest validates required fields are present and its value.
@@ -129,6 +132,11 @@ func (request NetworkLatencyRequest) ValidateRequest() error {
 	if request.JitterMilliseconds == nil {
 		return fmt.Errorf(MissingRequiredFieldError, "JitterMilliseconds")
 	}
+
+	if aws.ToUint64(request.DelayMilliseconds) == 0 && aws.ToUint64(request.JitterMilliseconds) == 0 {
+		return errors.New(ZeroDelayAndJitterError)
+	}
+
 	if len(request.Sources) == 0 {
 		return fmt.Errorf(MissingRequiredFieldError, "Sources")
 	}
@@ -137,6 +145,13 @@ func (request NetworkLatencyRequest) ValidateRequest() error {
 	}
 	if err := requireIPInRequestSources(request.SourcesToFilter, "SourcesToFilter"); err != nil {
 		return err
+	}
+
+	if request.FlowsPercent != nil {
+		flowsPercent := aws.ToInt(request.FlowsPercent)
+		if flowsPercent <= 0 || flowsPercent > 100 {
+			return fmt.Errorf(InvalidValueError, strconv.Itoa(flowsPercent), "flowsPercent")
+		}
 	}
 	return nil
 }
@@ -157,6 +172,7 @@ type NetworkPacketLossRequest struct {
 	// SourcesToFilter is a list including IPv4 addresses or IPv4 CIDR blocks that will be excluded from the
 	// network packet loss fault.
 	SourcesToFilter []*string `json:"SourcesToFilter,omitempty"`
+	FlowsPercent    *int      `json:"FlowsPercent"`
 }
 
 // ValidateRequest validates required fields are present and its value.
@@ -176,6 +192,13 @@ func (request NetworkPacketLossRequest) ValidateRequest() error {
 	}
 	if err := requireIPInRequestSources(request.SourcesToFilter, "SourcesToFilter"); err != nil {
 		return err
+	}
+
+	if request.FlowsPercent != nil {
+		flowsPercent := aws.ToInt(request.FlowsPercent)
+		if flowsPercent <= 0 || flowsPercent > 100 {
+			return fmt.Errorf(InvalidValueError, strconv.Itoa(flowsPercent), "flowsPercent")
+		}
 	}
 	return nil
 }

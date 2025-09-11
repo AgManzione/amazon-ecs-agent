@@ -89,6 +89,10 @@ func (agent *ecsAgent) appendFirelensNonRootUserCapability(capabilities []types.
 	return capabilities
 }
 
+func (agent *ecsAgent) appendEBSTANonRootUserCapabilities(capabilities []types.Attribute) []types.Attribute {
+	return capabilities
+}
+
 func (agent *ecsAgent) appendEFSCapabilities(capabilities []types.Attribute) []types.Attribute {
 	return capabilities
 }
@@ -156,4 +160,9 @@ var isFaultInjectionToolingAvailable = checkFaultInjectionTooling
 func checkFaultInjectionTooling(_ *config.Config) bool {
 	seelog.Warnf("Fault injection tooling is not supported on windows")
 	return false
+}
+
+// appendIPv6OnlyCapability is a no-op as IPv6-only capability is not supported on Windows.
+func appendIPv6OnlyCapability(capabilities []types.Attribute) []types.Attribute {
+	return capabilities
 }

@@ -1,4 +1,39 @@
 # Changelog
+
+# 1.99.0
+* Feature - Handle ecs.os-type-detailed attribute container instance registration [4724](https://github.com/aws/amazon-ecs-agent/pull/4724)
+* Feature - Support EBS task attach non-root user mode [4757](https://github.com/aws/amazon-ecs-agent/pull/4757)
+* Enhancement - Add container name visibility to the ListTagsForResource CloudTrail events coming from ECS agent [4760](https://github.com/aws/amazon-ecs-agent/pull/4760)
+* Enhancement - Get correct S3 URL suffix for EUSC regions in ecs-anywhere-install.sh [4761](https://github.com/aws/amazon-ecs-agent/pull/4761)
+* Enhancement - Remove unwanted docker-remote-api capabilities [4765](https://github.com/aws/amazon-ecs-agent/pull/4765)
+* Enhancement - Update ECS Anywhere exec agent version to 3.3.2958.0 [4768](https://github.com/aws/amazon-ecs-agent/pull/4768)
+
+# 1.98.0
+* Feature - Support for IPv6-only environments [4695](https://github.com/aws/amazon-ecs-agent/pull/4695)
+* Enhancement - Add groundwork for ECS_INSTANCE_IP_COMPATIBILITY override parameter [#4745](https://github.com/aws/amazon-ecs-agent/pull/4745)
+* Enhancement - Populate HostIPv6Address in container metadata file for IPv6-only instances [4753](https://github.com/aws/amazon-ecs-agent/pull/4753)
+* Enhancement - Update network latency fault check [4726](https://github.com/aws/amazon-ecs-agent/pull/4726)
+* Enhancement - Update exec agent configuration to support ipv6-only environments when ready [4708](https://github.com/aws/amazon-ecs-agent/pull/4708)
+* Enhancement - Bump minimum required docker version for ecs-init rpm to 20.10 [4732](https://github.com/aws/amazon-ecs-agent/pull/4732)
+* Bugfix - Initialize LastUpdated during healthcheck initialization. [#4750](https://github.com/aws/amazon-ecs-agent/pull/4750)
+* Bugfix - Make bridge pause containers appear first in task metadata response as a workaround for Service Connect Agents v1.29.12.1 and older [4749](https://github.com/aws/amazon-ecs-agent/pull/4749)
+* Bugfix - Fix CloudWatchLogs endpoints key in exec SSM Agent config for IPv6-only case [4755](https://github.com/aws/amazon-ecs-agent/pull/4755)
+
+# 1.97.1
+* Enhancement - Check if IPv6 kernel config file exists before using ip6tables [#4744](https://github.com/aws/amazon-ecs-agent/pull/4744)
+* Bugfix - Scope down IP address depletion fix to managed linux platform only [#4741](https://github.com/aws/amazon-ecs-agent/pull/4741)
+
+# 1.97.0
+* Enhancement - Bump github.com/aws/aws-sdk-go-v2/service/ssm to 1.60.0 in /agent [#4704](https://github.com/aws/amazon-ecs-agent/pull/4704)
+* Enhancement - Add Exponential/Backoff retry to GetResourceTags [#4710](https://github.com/aws/amazon-ecs-agent/pull/4710)
+* Enhancement - Add detailed OS family value to HTTPClient User Agent header [#4705](https://github.com/aws/amazon-ecs-agent/pull/4705)
+* Enhancement - Bump github.com/aws/aws-sdk-go-v2/service/ecr to 1.45.1 in /agent [#4713](https://github.com/aws/amazon-ecs-agent/pull/4713)
+* Enhancement - Fixed "unrecognized formatter" error by registering custom log formatter before loading seelog configuration [#4718](https://github.com/aws/amazon-ecs-agent/pull/4718)
+* Enhancement - Update aws-sdk-go-v2 to 1.36.6 [#4723](https://github.com/aws/amazon-ecs-agent/pull/4723)
+* Enhancement - Add eusc-de-east-1 to unresolved regions for CW logs endpoint [#4725](https://github.com/aws/amazon-ecs-agent/pull/4725)
+* Enhancement - Restrict introspection server access to local network by default [#4706](https://github.com/aws/amazon-ecs-agent/pull/4706)
+* Enhancement - Update Go version to 1.23.11 [#4728](https://github.com/aws/amazon-ecs-agent/pull/4728)
+
 # 1.96.0
 * Feature - Support ECS Firelens non-root user mode [#4697](https://github.com/aws/amazon-ecs-agent/pull/4697)
 * Enhancement - Consume dns server from payload [#4668](https://github.com/aws/amazon-ecs-agent/pull/4668)

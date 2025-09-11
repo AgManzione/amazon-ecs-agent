@@ -19,6 +19,7 @@ package config
 import (
 	"testing"
 
+	"github.com/aws/amazon-ecs-agent/ecs-agent/ipcompatibility"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -108,4 +109,62 @@ func TestParseTaskPidsLimit(t *testing.T) {
 
 func TestParseTaskPidsLimit_Unset(t *testing.T) {
 	assert.Equal(t, 0, parseTaskPidsLimit())
+}
+
+func TestGetDetailedOSFamilyWithValidValue(t *testing.T) {
+	t.Setenv(osFamilyEnvVar, "debian_11")
+
+	result := GetDetailedOSFamily()
+	assert.Equal(t, "debian_11", result)
+}
+
+func TestGetDetailedOSFamilyWithEmptyValue(t *testing.T) {
+	t.Setenv(osFamilyEnvVar, "")
+
+	result := GetDetailedOSFamily()
+	assert.Equal(t, "", result)
+}
+
+func TestGetDetailedOSFamilyNotSet(t *testing.T) {
+	result := GetDetailedOSFamily()
+
+	assert.Equal(t, "LINUX", result)
+}
+
+// verifies that GetOSFamily() always returns "LINUX"
+func TestGetOSFamilyAlwaysReturnsLinux(t *testing.T) {
+	osFamily := GetOSFamily()
+	assert.Equal(t, "LINUX", osFamily)
+
+	t.Setenv(osFamilyEnvVar, "debian_11")
+	osFamily = GetOSFamily()
+	assert.Equal(t, "LINUX", osFamily)
+}
+
+func TestParseInstanceIPCompatibility(t *testing.T) {
+	testCases := []struct {
+		name                    string
+		envValue                string
+		expectedIPCompatibility ipcompatibility.IPCompatibility
+	}{
+		{"empty value", "", ipcompatibility.IPCompatibility{}},
+		{"ipv4 lowercase", "ipv4", ipcompatibility.NewIPv4OnlyCompatibility()},
+		{"ipv4 uppercase", "IPV4", ipcompatibility.NewIPv4OnlyCompatibility()},
+		{"ipv4 mixed case", "IpV4", ipcompatibility.NewIPv4OnlyCompatibility()},
+		{"ipv6 lowercase", "ipv6", ipcompatibility.NewIPv6OnlyCompatibility()},
+		{"ipv6 uppercase", "IPV6", ipcompatibility.NewIPv6OnlyCompatibility()},
+		{"ipv6 mixed case", "IpV6", ipcompatibility.NewIPv6OnlyCompatibility()},
+		{"whitespace only", "  \t\n  ", ipcompatibility.IPCompatibility{}},
+		{"invalid value", "invalid", ipcompatibility.IPCompatibility{}},
+		{"dual", "dual", ipcompatibility.IPCompatibility{}},
+		{"both", "both", ipcompatibility.IPCompatibility{}},
+		{"numeric", "123", ipcompatibility.IPCompatibility{}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envInstanceIPCompatibility, tc.envValue)
+			assert.Equal(t, tc.expectedIPCompatibility, parseInstanceIPCompatibility())
+		})
+	}
 }

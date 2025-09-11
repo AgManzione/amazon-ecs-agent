@@ -28,6 +28,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const (
+	testDockerBridgeInterfaceName = "docker0"
+)
+
 func TestIsAgentImageLoadedListFailure(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
@@ -242,6 +246,7 @@ func validateCommonCreateContainerOptions(
 	expectKey("ECS_ENABLE_TASK_ENI=true", envVariables, t)
 	expectKey("ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true", envVariables, t)
 	expectKey(`ECS_VOLUME_PLUGIN_CAPABILITIES=["efsAuth"]`, envVariables, t)
+	expectKey("ECS_DETAILED_OS_FAMILY="+config.GetLinuxOSFamily(), envVariables, t)
 	if cfg.Image != config.AgentImageName {
 		t.Errorf("Expected image to be %s", config.AgentImageName)
 	}
@@ -1087,7 +1092,7 @@ func TestExecHelperProcess(t *testing.T) {
 	}
 
 	mockRealmList := "contoso.com\n  type: kerberos\n  realm-name: CONTOSO.COM\n  domain-name: contoso.com\n  configured: kerberos-member\n  server-software: active-directory\n  client-software: sssd\n  required-package: oddjob\n  required-package: oddjob-mkhomedir\n  required-package: sssd\n  required-package: adcli\n  required-package: samba-common-tools\n  login-formats: %U@contoso.com\n  login-policy: allow-realm-logins"
-	fmt.Fprintf(os.Stdout, mockRealmList)
+	fmt.Fprint(os.Stdout, mockRealmList)
 	os.Exit(0)
 }
 
@@ -1097,4 +1102,55 @@ func fakeExecCommand(command string, args ...string) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], cs...)
 	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
 	return cmd
+}
+
+func TestFindDefaultBridgeNetworkInterfaceName(t *testing.T) {
+
+	testCases := []struct {
+		name                              string
+		expectedError                     error
+		expectedDockerBridgeInterfaceName string
+		mockExpectations                  func(mockDocker *Mockdockerclient)
+	}{
+		{
+			name:                              "success",
+			expectedError:                     nil,
+			expectedDockerBridgeInterfaceName: testDockerBridgeInterfaceName,
+			mockExpectations: func(mockDocker *Mockdockerclient) {
+				mockDocker.EXPECT().FilteredListNetworks(gomock.Any()).Return(append(make([]godocker.Network, 0), godocker.Network{
+					Options: map[string]string{
+						dockerDefaultBridgeInterfaceOption: "true",
+						dockerInterfaceNameOption:          testDockerBridgeInterfaceName,
+					},
+				}), nil)
+			},
+		},
+		{
+			name:                              "error",
+			expectedError:                     fmt.Errorf("error unable to find docker bridge interface"),
+			expectedDockerBridgeInterfaceName: "",
+			mockExpectations: func(mockDocker *Mockdockerclient) {
+				mockDocker.EXPECT().FilteredListNetworks(gomock.Any()).Return(nil, fmt.Errorf("error unable to find docker bridge interface"))
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
+			mockDocker := NewMockdockerclient(mockCtrl)
+
+			tc.mockExpectations(mockDocker)
+
+			client := &client{
+				docker: mockDocker,
+			}
+			dockerBridgeInterfaceName, err := client.FindDefaultBridgeNetworkInterfaceName()
+
+			assert.Equal(t, tc.expectedError, err)
+			assert.Equal(t, tc.expectedDockerBridgeInterfaceName, dockerBridgeInterfaceName)
+		})
+	}
+
 }
